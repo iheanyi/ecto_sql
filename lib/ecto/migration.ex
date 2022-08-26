@@ -180,24 +180,11 @@ defmodule Ecto.Migration do
   To avoid that we recommend to use `execute/2` with anonymous functions instead.
   For more information and example usage please take a look at `execute/2` function.
 
-  ## Comments
-
-  Migrations where you create or alter a table support specifying table
-  and column comments. The same can be done when creating constraints
-  and indexes. Not all databases support this feature.
-
-      def up do
-        create index("posts", [:name], comment: "Index Comment")
-        create constraint("products", "price_must_be_positive", check: "price > 0", comment: "Constraint Comment")
-        create table("weather", prefix: "north_america", comment: "Table Comment") do
-          add :city, :string, size: 40, comment: "Column Comment"
-          timestamps()
-        end
-      end
-
   ## Repo configuration
 
-  The following migration configuration options are available for a given repository:
+  ### Migrator configuration
+
+  These options configure how the underlying migration engine works:
 
     * `:migration_source` - Version numbers of migrations will be saved in a
       table named `schema_migrations` by default. You can configure the name of
@@ -205,33 +192,17 @@ defmodule Ecto.Migration do
 
           config :app, App.Repo, migration_source: "my_migrations"
 
-    * `:migration_primary_key` - By default, Ecto uses the `:id` column with type
-      `:bigserial`, but you can configure it via:
-
-          config :app, App.Repo, migration_primary_key: [name: :uuid, type: :binary_id]
-
-          config :app, App.Repo, migration_primary_key: false
-
-    * `:migration_foreign_key` - By default, Ecto uses the migration_primary_key type
-      for foreign keys when references/2 is used, but you can configure it via:
-
-          config :app, App.Repo, migration_foreign_key: [column: :uuid, type: :binary_id]
-
-    * `:migration_timestamps` - By default, Ecto uses the `:naive_datetime` type, but
-      you can configure it via:
-
-          config :app, App.Repo, migration_timestamps: [type: :utc_datetime]
-
-    * `:migration_lock` - By default, Ecto will lock the migration table. This allows
-      multiple nodes to attempt to run migrations at the same time but only one will
-      succeed. You can disable the `migration_lock` by setting it to `false`
+    * `:migration_lock` - By default, Ecto will lock the migration source to throttle
+      multiple nodes to run migrations one at a time. You can disable the `migration_lock`
+      by setting it to `false`. You may also select a different locking strategy if
+      supported by the adapter. See the adapter docs for more information.
 
           config :app, App.Repo, migration_lock: false
 
-    * `:migration_default_prefix` - Ecto defaults to `nil` for the database prefix for
-      migrations, but you can configure it via:
-
-          config :app, App.Repo, migration_default_prefix: "my_prefix"
+          # Or use a different locking strategy. For example, Postgres can use advisory
+          # locks but be aware that your database configuration might not make this a good
+          # fit. See the Ecto.Adapters.Postgres for more information:
+          config :app, App.Repo, migration_lock: :pg_advisory_lock
 
     * `:migration_repo` - The migration repository is where the table managing the
       migrations will be stored (`migration_source` defines the table name). It defaults
@@ -247,6 +218,55 @@ defmodule Ecto.Migration do
       running migrations. Used by `Ecto.Migrator.with_repo/3` and the migration tasks:
 
           config :app, App.Repo, start_apps_before_migration: [:ssl, :some_custom_logger]
+
+  ### Migrations configuration
+
+  These options configure how each migration works. **It is generally discouraged
+  to change any of those configurations after your database is deployed to production,
+  as changing these options will retroactively change how all migrations work**.
+
+    * `:migration_primary_key` - By default, Ecto uses the `:id` column with type
+      `:bigserial`, but you can configure it via:
+
+          config :app, App.Repo, migration_primary_key: [name: :uuid, type: :binary_id]
+
+          config :app, App.Repo, migration_primary_key: false
+
+    * `:migration_foreign_key` - By default, Ecto uses the `primary_key` type
+      for foreign keys when `references/2` is used, but you can configure it via:
+
+          config :app, App.Repo, migration_foreign_key: [column: :uuid, type: :binary_id]
+
+    * `:migration_timestamps` - By default, Ecto uses the `:naive_datetime` as the type,
+      `:inserted_at` as the name of the column for storing insertion times, `:updated_at` as
+      the name of the column for storing last-updated-at times, but you can configure it
+      via:
+
+          config :app, App.Repo, migration_timestamps: [
+            type: :utc_datetime,
+            inserted_at: :created_at,
+            updated_at: :changed_at
+          ]
+
+    * `:migration_default_prefix` - Ecto defaults to `nil` for the database prefix for
+      migrations, but you can configure it via:
+
+          config :app, App.Repo, migration_default_prefix: "my_prefix"
+
+  ## Comments
+
+  Migrations where you create or alter a table support specifying table
+  and column comments. The same can be done when creating constraints
+  and indexes. Not all databases support this feature.
+
+      def up do
+        create index("posts", [:name], comment: "Index Comment")
+        create constraint("products", "price_must_be_positive", check: "price > 0", comment: "Constraint Comment")
+        create table("weather", prefix: "north_america", comment: "Table Comment") do
+          add :city, :string, size: 40, comment: "Column Comment"
+          timestamps()
+        end
+      end
 
   ## Prefixes
 
@@ -300,7 +320,7 @@ defmodule Ecto.Migration do
             use Ecto.Migration
 
             def after_begin() do
-              repo().query! "SET lock_timeout TO '5s'", "SET lock_timeout TO '10s'"
+              repo().query! "SET lock_timeout TO '5s'"
             end
           end
         end
@@ -308,6 +328,11 @@ defmodule Ecto.Migration do
 
   Then in your migrations you can `use MyApp.Migration` to share this behavior
   among all your migrations.
+
+  ## Additional resources
+
+    * The [Safe Ecto Migrations guide](https://fly.io/phoenix-files/safe-ecto-migrations/)
+
   """
 
   @doc """
@@ -367,7 +392,7 @@ defmodule Ecto.Migration do
     To define a table in a migration, see `Ecto.Migration.table/2`.
     """
     defstruct name: nil, prefix: nil, comment: nil, primary_key: true, engine: nil, options: nil
-    @type t :: %__MODULE__{name: String.t, prefix: atom | nil, comment: String.t | nil, primary_key: boolean,
+    @type t :: %__MODULE__{name: String.t, prefix: atom | nil, comment: String.t | nil, primary_key: boolean | keyword(),
                            engine: atom, options: String.t}
   end
 
@@ -468,7 +493,7 @@ defmodule Ecto.Migration do
       table = %Table{} = unquote(object)
       Runner.start_command({unquote(command), Ecto.Migration.__prefix__(table)})
 
-      if primary_key = table.primary_key && Ecto.Migration.__primary_key__() do
+      if primary_key = Ecto.Migration.__primary_key__(table) do
         {name, type, opts} = primary_key
         add(name, type, opts)
       end
@@ -553,7 +578,7 @@ defmodule Ecto.Migration do
 
   defp do_create(table, command) do
     columns =
-      if primary_key = table.primary_key && Ecto.Migration.__primary_key__() do
+      if primary_key = Ecto.Migration.__primary_key__(table) do
         {name, type, opts} = primary_key
         [{:add, name, type, opts}]
       else
@@ -599,7 +624,7 @@ defmodule Ecto.Migration do
 
       drop_if_exists index("posts", [:name])
       drop_if_exists table("posts")
-      drop_if_exists index("posts, [:name]), mode: :cascade
+      drop_if_exists index("posts", [:name]), mode: :cascade
       drop_if_exists table("posts"), mode: :cascade
 
   ## Options
@@ -636,12 +661,16 @@ defmodule Ecto.Migration do
   ## Options
 
     * `:primary_key` - when `false`, a primary key field is not generated on table
-      creation.
+      creation. Alternatively, a keyword list in the same style of the
+      `:migration_primary_key` repository configuration can be supplied
+      to control the generation of the primary key field. The keyword list
+      must include `:name` and `:type`. See `add/3` for further options.
     * `:engine` - customizes the table storage for supported databases. For MySQL,
       the default is InnoDB.
     * `:prefix` - the prefix for the table. This prefix will automatically be used
       for all constraints and references defined for this table unless explicitly
       overridden in said constraints/references.
+    * `:comment` - adds a comment to the table.
     * `:options` - provide custom options that will be appended after the generated
       statement. For example, "WITH", "INHERITS", or "ON COMMIT" clauses.
 
@@ -676,6 +705,7 @@ defmodule Ecto.Migration do
     * `:include` - specify fields for a covering index. This is not supported
       by all databases. For more information on PostgreSQL support, please
       [read the official docs](https://www.postgresql.org/docs/current/indexes-index-only-scans.html).
+    * `:comment` - adds a comment to the index.
 
   ## Adding/dropping indexes concurrently
 
@@ -684,28 +714,32 @@ defmodule Ecto.Migration do
   However, this feature does not work well with the transactions used by
   Ecto to guarantee integrity during migrations.
 
-  Therefore, to migrate indexes concurrently, you need to set
-  both `@disable_ddl_transaction` and `@disable_migration_lock` to true:
+  You can address this with two changes:
 
+    1. Change your repository to use PG advisory locks as the migration lock.
+       Note this may not be supported by Postgres-like databases and proxies.
+
+    2. Disable DDL transactions. Doing this removes the guarantee that all of
+      the changes in the migration will happen at once, so you will want to
+      keep it short.
+
+  If the database adapter supports several migration lock strategies, such as
+  Postgrex, then review those strategies and consider using a strategy that
+  utilizes advisory locks to faciliate running migrations one at a time even
+  across multiple nodes. For example:
+
+      # Config the Repo (PostgreSQL example)
+      config MyApp.Repo, migration_lock: :pg_advisory_lock
+
+      # Migrate with your concurrent operation
       defmodule MyRepo.Migrations.CreateIndexes do
         use Ecto.Migration
         @disable_ddl_transaction true
-        @disable_migration_lock true
 
         def change do
           create index("posts", [:slug], concurrently: true)
         end
       end
-
-  Disabling DDL transactions removes the guarantee that all of the changes
-  in the migration will happen at once. Disabling the migration lock removes
-  the guarantee only a single node will run a given migration if multiple
-  nodes are attempting to migrate at the same time.
-
-  Since running migrations outside a transaction and without locks can be
-  dangerous, consider performing very few operations in migrations that add
-  concurrent indexes. We recommend to run migrations with concurrent indexes
-  in isolation and disable those features only temporarily.
 
   ## Index types
 
@@ -896,6 +930,14 @@ defmodule Ecto.Migration do
   Custom Ecto types like `Ecto.UUID` are not supported because
   they are application-level concerns and may not always map to the database.
 
+  Note: It may be necessary to quote case-sensitive, user-defined type names.
+  For example, PostgreSQL normalizes all identifiers to lower case unless
+  they are wrapped in double quotes. To ensure a case-sensitive type name
+  is sent properly, it must be defined `:'"LikeThis"'` or `:"\"LikeThis\""`.
+  This is not necessary for column names because Ecto quotes them automatically.
+  Type names are not automatically quoted because they may be expressions such
+  as `varchar(255)`.
+
   ## Examples
 
       create table("posts") do
@@ -903,8 +945,9 @@ defmodule Ecto.Migration do
       end
 
       alter table("posts") do
-        add :summary, :text # Database type
-        add :object,  :map  # Elixir type which is handled by the database
+        add :summary, :text               # Database type
+        add :object,  :map                # Elixir type which is handled by the database
+        add :custom, :'"UserDefinedType"' # A case-sensitive, user-defined type name
       end
 
   ## Options
@@ -914,12 +957,15 @@ defmodule Ecto.Migration do
     * `:default` - the column's default value. It can be a string, number, empty
       list, list of strings, list of numbers, or a fragment generated by
       `fragment/1`.
-    * `:null` - when `false`, the column does not allow null values.
+    * `:null` - determines whether the column accepts null values. When not specified,
+      the database will use its default behaviour (which is to treat the column as nullable
+      in most databases).
     * `:size` - the size of the type (for example, the number of characters).
       The default is no size, except for `:string`, which defaults to `255`.
     * `:precision` - the precision for a numeric type. Required when `:scale` is
       specified.
     * `:scale` - the scale of a numeric type. Defaults to `0`.
+    * `:comment` - adds a comment to the added column.
     * `:after` - positions field after the specified one. Only supported on MySQL,
       it is ignored by other databases.
 
@@ -965,7 +1011,9 @@ defmodule Ecto.Migration do
   end
 
   @doc """
-  Renames a column outside of the `alter` statement.
+  Renames a column.
+
+  Note that this occurs outside of the `alter` statement.
 
   ## Examples
 
@@ -995,6 +1043,9 @@ defmodule Ecto.Migration do
   Those columns are of `:naive_datetime` type and by default cannot be null. A
   list of `opts` can be given to customize the generated fields.
 
+  Following options will override the repo configuration specified by
+  `:migration_timestamps` option.
+
   ## Options
 
     * `:inserted_at` - the name of the column for storing insertion times.
@@ -1003,6 +1054,9 @@ defmodule Ecto.Migration do
       Setting it to `false` disables the column.
     * `:type` - the type of the `:inserted_at` and `:updated_at` columns.
       Defaults to `:naive_datetime`.
+    * `:default` - the columns' default value. It can be a string, number, empty
+      list, list of strings, list of numbers, or a fragment generated by
+      `fragment/1`.
 
   """
   def timestamps(opts \\ []) when is_list(opts) do
@@ -1021,10 +1075,12 @@ defmodule Ecto.Migration do
   Modifies the type of a column when altering a table.
 
   This command is not reversible unless the `:from` option is provided.
-  If the `:from` value is a `%Reference{}`, the adapter will try to drop
+  When the `:from` option is set, the adapter will try to drop
   the corresponding foreign key constraints before modifying the type.
-  Note `:from` cannot be used to modify primary keys, as those are
-  generally trickier to make reversible.
+  Generally speaking, you want to pass the type and each option
+  you are modifying to `:from`, so the column can be rolled back properly.
+  However, note that `:from` cannot be be used to modify primary keys,
+  as those are generally trickier to revert.
 
   See `add/3` for more information on supported types.
 
@@ -1032,7 +1088,9 @@ defmodule Ecto.Migration do
   such as adding or dropping a null constraints, consider using
   the `execute/2` command with the relevant SQL command instead
   of `modify/3`, if supported by your database. This may avoid
-  redundant type updates and be more efficient.
+  redundant type updates and be more efficient, as an unnecessary
+  type update can lock the table, even if the type actually
+  doesn't change.
 
   ## Examples
 
@@ -1040,16 +1098,28 @@ defmodule Ecto.Migration do
         modify :title, :text
       end
 
+      # Self rollback when using the :from option
+      alter table("posts") do
+        modify :title, :text, from: :string
+      end
+
+      # Modify column with rollback options
+      alter table("posts") do
+        modify :title, :text, null: false, from: {:string, null: true}
+      end
+
   ## Options
 
-    * `:null` - determines whether the column accepts null values.
+    * `:null` - determines whether the column accepts null values. If this option is
+      not set, the nullable behaviour of the underlying column is not modified.
     * `:default` - changes the default value of the column.
-    * `:from` - specifies the current type of the column.
+    * `:from` - specifies the current type and options of the column.
     * `:size` - specifies the size of the type (for example, the number of characters).
       The default is no size.
     * `:precision` - the precision for a numeric type. Required when `:scale` is
       specified.
     * `:scale` - the scale of a numeric type. Defaults to `0`.
+    * `:comment` - adds a comment to the modified column.
   """
   def modify(column, type, opts \\ []) when is_atom(column) and is_list(opts) do
     validate_precision_opts!(opts, column)
@@ -1137,7 +1207,7 @@ defmodule Ecto.Migration do
 
     * `:name` - The name of the underlying reference, which defaults to
       "#{table}_#{column}_fkey".
-    * `:column` - The foreign key column name, which defaults to `:id`.
+    * `:column` - The column name in the referenced table, which defaults to `:id`.
     * `:prefix` - The prefix for the reference. Defaults to the prefix
       defined by the block's `table/2` struct (the "products" table in
       the example above), or `nil`.
@@ -1204,6 +1274,7 @@ defmodule Ecto.Migration do
     * `:validate` - Whether or not to validate the constraint on creation (true by default). Only
        available in PostgreSQL, and should be followed by a command to validate the new constraint in
        a following migration if false.
+    * `:comment` - adds a comment to the constraint.
 
   """
   def constraint(table, name, opts \\ [])
@@ -1308,16 +1379,27 @@ defmodule Ecto.Migration do
   end
 
   @doc false
-  def __primary_key__() do
-    case Runner.repo_config(:migration_primary_key, []) do
-      false ->
-        false
+  def __primary_key__(table) do
+    case table.primary_key do
+      false -> false
 
-      opts when is_list(opts) ->
-        opts = Keyword.put(opts, :primary_key, true)
-        {name, opts} = Keyword.pop(opts, :name, :id)
-        {type, opts} = Keyword.pop(opts, :type, :bigserial)
-        {name, type, opts}
+      true ->
+        case Runner.repo_config(:migration_primary_key, []) do
+          false -> false
+          opts when is_list(opts) -> pk_opts_to_tuple(opts)
+        end
+
+      opts when is_list(opts) -> pk_opts_to_tuple(opts)
+
+      _ ->
+        raise ArgumentError, ":primary_key option must be either a boolean or a keyword list of options"
     end
+  end
+
+  defp pk_opts_to_tuple(opts) do
+    opts = Keyword.put(opts, :primary_key, true)
+    {name, opts} = Keyword.pop(opts, :name, :id)
+    {type, opts} = Keyword.pop(opts, :type, :bigserial)
+    {name, type, opts}
   end
 end

@@ -1,5 +1,5 @@
 defmodule Ecto.Adapters.SQL do
-  @moduledoc """
+  @moduledoc ~S"""
   This application provides functionality for working with
   SQL databases in `Ecto`.
 
@@ -11,9 +11,41 @@ defmodule Ecto.Adapters.SQL do
     * `Ecto.Adapters.MyXQL` for MySQL
     * `Ecto.Adapters.Tds` for SQLServer
 
+  ## Additional functions
+
+  If your `Ecto.Repo` is backed by any of the SQL adapters above,
+  this module will inject additional functions into your repository:
+
+    * `disconnect_all(interval, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.disconnect_all/3`
+
+    * `explain(type, query, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.explain/4`
+
+    * `query(sql, params, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.query/4`
+
+    * `query!(sql, params, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.query!/4`
+
+    * `query_many(sql, params, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.query_many/4`
+
+    * `query_many!(sql, params, options \\ [])` -
+       shortcut for `Ecto.Adapters.SQL.query_many!/4`
+
+    * `to_sql(type, query)` -
+       shortcut for `Ecto.Adapters.SQL.to_sql/3`
+
+  Generally speaking, you must invoke those functions directly from
+  your repository, for example: `MyApp.Repo.query("SELECT true")`.
+  You can also invoke them directly from `Ecto.Adapters.SQL`, but
+  keep in mind that in such cases features such as "dynamic repositories"
+  won't be available.
+
   ## Migrations
 
-  Ecto supports database migrations. You can generate a migration
+  `ecto_sql` supports database migrations. You can generate a migration
   with:
 
       $ mix ecto.gen.migration create_posts
@@ -129,7 +161,7 @@ defmodule Ecto.Adapters.SQL do
 
       @impl true
       def execute(adapter_meta, query_meta, query, params, opts) do
-        Ecto.Adapters.SQL.execute(adapter_meta, query_meta, query, params, opts)
+        Ecto.Adapters.SQL.execute(:named, adapter_meta, query_meta, query, params, opts)
       end
 
       @impl true
@@ -160,14 +192,14 @@ defmodule Ecto.Adapters.SQL do
       @impl true
       def update(adapter_meta, %{source: source, prefix: prefix}, fields, params, returning, opts) do
         {fields, field_values} = :lists.unzip(fields)
-        filter_values = params |> Keyword.values() |> Enum.reject(&is_nil(&1))
+        filter_values = Keyword.values(params)
         sql = @conn.update(prefix, source, fields, params, returning)
         Ecto.Adapters.SQL.struct(adapter_meta, @conn, sql, :update, source, params, field_values ++ filter_values, :raise, returning, opts)
       end
 
       @impl true
       def delete(adapter_meta, %{source: source, prefix: prefix}, params, opts) do
-        filter_values = params |> Keyword.values() |> Enum.reject(&is_nil(&1))
+        filter_values = Keyword.values(params)
         sql = @conn.delete(prefix, source, params, [])
         Ecto.Adapters.SQL.struct(adapter_meta, @conn, sql, :delete, source, params, filter_values, :raise, [], opts)
       end
@@ -280,17 +312,18 @@ defmodule Ecto.Adapters.SQL do
   Postgrex         | `analyze`, `verbose`, `costs`, `settings`, `buffers`, `timing`, `summary`
   MyXQL            | None
 
-  _Postgrex_: Check [PostgreSQL doc](https://www.postgresql.org/docs/current/sql-explain.html) for version compatibility.
-
-  _MyXQL_: `EXTENDED` and `PARTITIONS` opts were [deprecated](https://dev.mysql.com/doc/refman/5.7/en/explain.html) and are enabled by default.
+  _Postgrex_: Check [PostgreSQL doc](https://www.postgresql.org/docs/current/sql-explain.html)
+  for version compatibility.
 
   Also note that:
 
     * Currently `:map`, `:yaml`, and `:text` format options are supported
       for PostgreSQL. `:map` is the deserialized JSON encoding. The last two
-      options return the result as a string.
+      options return the result as a string;
+
     * Any other value passed to `opts` will be forwarded to the underlying
       adapter query function, including Repo shared options such as `:timeout`;
+
     * Non built-in adapters may have specific behavior and you should consult
       their own documentation.
 
@@ -313,12 +346,44 @@ defmodule Ecto.Adapters.SQL do
      |> Ecto.Multi.run(:rollback, fn _, _ ->
        {:error, :forced_rollback}
      end)
-     |> repo.transaction()
+     |> repo.transaction(opts)
      |> case do
        {:error, :rollback, :forced_rollback, %{explain: result}} -> result
        {:error, :explain, error, _} -> raise error
        _ -> raise "unable to execute explain"
      end
+  end
+
+  @doc """
+  Forces all connections in the repo pool to disconnect within the given interval.
+
+  Once this function is called, the pool will disconnect all of its connections
+  as they are checked in or as they are pinged. Checked in connections will be
+  randomly disconnected within the given time interval. Pinged connections are
+  immediately disconnected - as they are idle (according to `:idle_interval`).
+
+  If the connection has a backoff configured (which is the case by default),
+  disconnecting means an attempt at a new connection will be done immediately
+  after, without starting a new process for each connection. However, if backoff
+  has been disabled, the connection process will terminate. In such cases,
+  disconnecting all connections may cause the pool supervisor to restart
+  depending on the max_restarts/max_seconds configuration of the pool,
+  so you will want to set those carefully.
+
+  For convenience, this function is also available in the repository:
+
+      iex> MyRepo.disconnect_all(60_000)
+      :ok
+  """
+  @spec disconnect_all(pid | Ecto.Repo.t | Ecto.Adapter.adapter_meta, non_neg_integer, opts :: Keyword.t()) :: :ok
+  def disconnect_all(repo, interval, opts \\ [])
+
+  def disconnect_all(repo, interval, opts) when is_atom(repo) or is_pid(repo) do
+    disconnect_all(Ecto.Adapter.lookup_meta(repo), interval, opts)
+  end
+
+  def disconnect_all(%{pid: pid} = _adapter_meta, interval, opts) do
+    DBConnection.disconnect_all(pid, interval, opts)
   end
 
   @doc """
@@ -359,7 +424,7 @@ defmodule Ecto.Adapters.SQL do
   @doc """
   Same as `query/4` but raises on invalid queries.
   """
-  @spec query!(Ecto.Repo.t | Ecto.Adapter.adapter_meta, iodata, [term], Keyword.t) ::
+  @spec query!(pid() | Ecto.Repo.t | Ecto.Adapter.adapter_meta, iodata, [term], Keyword.t) ::
                %{:rows => nil | [[term] | binary],
                  :num_rows => non_neg_integer,
                  optional(atom) => any}
@@ -371,7 +436,7 @@ defmodule Ecto.Adapters.SQL do
   end
 
   @doc """
-  Runs custom SQL query on given repo.
+  Runs a custom SQL query on the given repo.
 
   In case of success, it must return an `:ok` tuple containing
   a map with at least two keys:
@@ -413,6 +478,63 @@ defmodule Ecto.Adapters.SQL do
     sql_call(adapter_meta, :query, [sql], params, opts)
   end
 
+  @doc """
+  Same as `query_many/4` but raises on invalid queries.
+  """
+  @spec query_many!(Ecto.Repo.t | Ecto.Adapter.adapter_meta, iodata, [term], Keyword.t) ::
+               [%{:rows => nil | [[term] | binary],
+                 :num_rows => non_neg_integer,
+                 optional(atom) => any}]
+  def query_many!(repo, sql, params \\ [], opts \\ []) do
+    case query_many(repo, sql, params, opts) do
+      {:ok, result} -> result
+      {:error, err} -> raise_sql_call_error err
+    end
+  end
+
+  @doc """
+  Runs a custom SQL query that returns multiple results on the given repo.
+
+  In case of success, it must return an `:ok` tuple containing
+  a list of maps with at least two keys:
+
+    * `:num_rows` - the number of rows affected
+
+    * `:rows` - the result set as a list. `nil` may be returned
+      instead of the list if the command does not yield any row
+      as result (but still yields the number of affected rows,
+      like a `delete` command without returning would)
+
+  ## Options
+
+    * `:log` - When false, does not log the query
+
+  ## Examples
+
+      iex> Ecto.Adapters.SQL.query_many(MyRepo, "SELECT $1; SELECT $2;", [40, 2])
+      {:ok, [%{rows: [[40]], num_rows: 1}, %{rows: [[2]], num_rows: 1}]}
+
+  For convenience, this function is also available under the repository:
+
+      iex> MyRepo.query_many(SELECT $1; SELECT $2;", [40, 2])
+      {:ok, [%{rows: [[40]], num_rows: 1}, %{rows: [[2]], num_rows: 1}]}
+
+  """
+  @spec query_many(pid() | Ecto.Repo.t | Ecto.Adapter.adapter_meta, iodata, [term], Keyword.t) ::
+              {:ok, [%{:rows => nil | [[term] | binary],
+                      :num_rows => non_neg_integer,
+                      optional(atom) => any}]}
+              | {:error, Exception.t}
+  def query_many(repo, sql, params \\ [], opts \\ [])
+
+  def query_many(repo, sql, params, opts) when is_atom(repo) or is_pid(repo) do
+    query_many(Ecto.Adapter.lookup_meta(repo), sql, params, opts)
+  end
+
+  def query_many(adapter_meta, sql, params, opts) do
+    sql_call(adapter_meta, :query_many, [sql], params, opts)
+  end
+
   defp sql_call(adapter_meta, callback, args, params, opts) do
     %{pid: pool, telemetry: telemetry, sql: sql, opts: default_opts} = adapter_meta
     conn = get_conn_or_pool(pool)
@@ -423,7 +545,7 @@ defmodule Ecto.Adapters.SQL do
 
   defp put_source(opts, %{sources: sources}) when is_binary(elem(elem(sources, 0), 0)) do
     {source, _, _} = elem(sources, 0)
-    Keyword.put(opts, :source, source)
+    [source: source] ++ opts
   end
 
   defp put_source(opts, _) do
@@ -484,7 +606,6 @@ defmodule Ecto.Adapters.SQL do
     |> IO.iodata_to_binary()
   end
 
-
   defp binary_length(nil), do: 4 # NULL
   defp binary_length(binary) when is_binary(binary), do: String.length(binary)
   defp binary_length(other), do: other |> inspect() |> String.length()
@@ -511,30 +632,6 @@ defmodule Ecto.Adapters.SQL do
 
   @doc false
   def __before_compile__(driver, _env) do
-    case Application.get_env(:ecto, :json_library) do
-      nil ->
-        :ok
-
-      Jason ->
-        IO.warn """
-        Jason is the default :json_library in Ecto 3.0.
-        You no longer need to configure it explicitly,
-        please remove this line from your config files:
-
-            config :ecto, :json_library, Jason
-
-        """
-
-      value ->
-        IO.warn """
-        The :json_library configuration for the :ecto application is deprecated.
-        Please configure the :json_library in the driver instead:
-
-            config #{inspect driver}, :json_library, #{inspect value}
-
-        """
-    end
-
     quote do
       @doc """
       A convenience function for SQL-based repositories that executes the given query.
@@ -555,6 +652,24 @@ defmodule Ecto.Adapters.SQL do
       end
 
       @doc """
+      A convenience function for SQL-based repositories that executes the given multi-result query.
+
+      See `Ecto.Adapters.SQL.query_many/4` for more information.
+      """
+      def query_many(sql, params \\ [], opts \\ []) do
+        Ecto.Adapters.SQL.query_many(get_dynamic_repo(), sql, params, opts)
+      end
+
+      @doc """
+      A convenience function for SQL-based repositories that executes the given multi-result query.
+
+      See `Ecto.Adapters.SQL.query_many!/4` for more information.
+      """
+      def query_many!(sql, params \\ [], opts \\ []) do
+        Ecto.Adapters.SQL.query_many!(get_dynamic_repo(), sql, params, opts)
+      end
+
+      @doc """
       A convenience function for SQL-based repositories that translates the given query to SQL.
 
       See `Ecto.Adapters.SQL.to_sql/3` for more information.
@@ -572,6 +687,16 @@ defmodule Ecto.Adapters.SQL do
       def explain(operation, queryable, opts \\ []) do
         Ecto.Adapters.SQL.explain(get_dynamic_repo(), operation, queryable, opts)
       end
+
+      @doc """
+      A convenience function for SQL-based repositories that forces all connections in the
+      pool to disconnect within the given interval.
+
+      See `Ecto.Adapters.SQL.disconnect_all/3` for more information.
+      """
+      def disconnect_all(interval, opts \\ []) do
+        Ecto.Adapters.SQL.disconnect_all(get_dynamic_repo(), interval, opts)
+      end
     end
   end
 
@@ -581,7 +706,7 @@ defmodule Ecto.Adapters.SQL do
   end
 
   @pool_opts [:timeout, :pool, :pool_size] ++
-               [:queue_target, :queue_interval, :ownership_timeout]
+               [:queue_target, :queue_interval, :ownership_timeout, :repo]
 
   @doc false
   def init(connection, driver, config) do
@@ -600,12 +725,13 @@ defmodule Ecto.Adapters.SQL do
     end
 
     log = Keyword.get(config, :log, :debug)
+    stacktrace = Keyword.get(config, :stacktrace, nil)
     telemetry_prefix = Keyword.fetch!(config, :telemetry_prefix)
     telemetry = {config[:repo], log, telemetry_prefix ++ [:query]}
 
     config = adapter_config(config)
     opts = Keyword.take(config, @pool_opts)
-    meta = %{telemetry: telemetry, sql: connection, opts: opts}
+    meta = %{telemetry: telemetry, sql: connection, stacktrace: stacktrace, opts: opts}
     {:ok, connection.child_spec(config), meta}
   end
 
@@ -649,10 +775,12 @@ defmodule Ecto.Adapters.SQL do
   def insert_all(adapter_meta, schema_meta, conn, header, rows, on_conflict, returning, placeholders, opts) do
     %{source: source, prefix: prefix} = schema_meta
     {_, conflict_params, _} = on_conflict
-    {rows, params} = case rows do
-      {%Ecto.Query{} = query, params} -> {query, Enum.reverse(params)}
-      rows -> unzip_inserts(header, rows)
-    end
+
+    {rows, params} =
+      case rows do
+        {%Ecto.Query{} = query, params} -> {query, Enum.reverse(params)}
+        rows -> unzip_inserts(header, rows)
+      end
 
     sql = conn.insert(prefix, source, header, rows, on_conflict, returning, placeholders)
 
@@ -663,9 +791,8 @@ defmodule Ecto.Adapters.SQL do
     end
 
     all_params = placeholders ++ Enum.reverse(params, conflict_params)
-    %{num_rows: num, rows: rows} =
-      query!(adapter_meta, sql, all_params, opts)
 
+    %{num_rows: num, rows: rows} = query!(adapter_meta, sql, all_params, opts)
     {num, rows}
   end
 
@@ -688,26 +815,38 @@ defmodule Ecto.Adapters.SQL do
   end
 
   @doc false
-  def execute(adapter_meta, query_meta, prepared, params, opts) do
+  def execute(prepare, adapter_meta, query_meta, prepared, params, opts) do
     %{num_rows: num, rows: rows} =
-      execute!(adapter_meta, prepared, params, put_source(opts, query_meta))
+      execute!(prepare, adapter_meta, prepared, params, put_source(opts, query_meta))
 
     {num, rows}
   end
 
-  defp execute!(adapter_meta, {:cache, update, {id, prepared}}, params, opts) do
-    name = "ecto_" <> Integer.to_string(id)
+  defp execute!(prepare, adapter_meta, {:cache, update, {id, prepared}}, params, opts) do
+    name = prepare_name(prepare, id)
 
     case sql_call(adapter_meta, :prepare_execute, [name, prepared], params, opts) do
       {:ok, query, result} ->
-        update.({id, query})
+        maybe_update_cache(prepare, update, {id, query})
         result
       {:error, err} ->
         raise_sql_call_error err
     end
   end
 
-  defp execute!(adapter_meta, {:cached, update, reset, {id, cached}}, params, opts) do
+  defp execute!(:unnamed = prepare, adapter_meta, {:cached, _update, _reset, {id, cached}}, params, opts) do
+    name = prepare_name(prepare, id)
+    prepared = String.Chars.to_string(cached)
+
+    case sql_call(adapter_meta, :prepare_execute, [name, prepared], params, opts) do
+      {:ok, _query, result} ->
+        result
+      {:error, err} ->
+        raise_sql_call_error err
+    end
+  end
+
+  defp execute!(:named = _prepare, adapter_meta, {:cached, update, reset, {id, cached}}, params, opts) do
     case sql_call(adapter_meta, :execute, [cached], params, opts) do
       {:ok, query, result} ->
         update.({id, query})
@@ -722,12 +861,18 @@ defmodule Ecto.Adapters.SQL do
     end
   end
 
-  defp execute!(adapter_meta, {:nocache, {_id, prepared}}, params, opts) do
+  defp execute!(_prepare, adapter_meta, {:nocache, {_id, prepared}}, params, opts) do
     case sql_call(adapter_meta, :query, [prepared], params, opts) do
       {:ok, res} -> res
       {:error, err} -> raise_sql_call_error err
     end
   end
+
+  defp prepare_name(:named, id), do: "ecto_" <> Integer.to_string(id)
+  defp prepare_name(:unnamed, _id), do: ""
+
+  defp maybe_update_cache(:named = _prepare, update, value), do: update.(value)
+  defp maybe_update_cache(:unnamed = _prepare, _update, _value), do: :noop
 
   @doc false
   def stream(adapter_meta, query_meta, prepared, params, opts) do
@@ -895,13 +1040,9 @@ defmodule Ecto.Adapters.SQL do
     } = entry
 
     source = Keyword.get(opts, :source)
-    query_string = String.Chars.to_string(query)
-
-    params =
-      Enum.map(params, fn
-        %Ecto.Query.Tagged{value: value} -> value
-        value -> value
-      end)
+    query = String.Chars.to_string(query)
+    result = with {:ok, _query, res} <- result, do: {:ok, res}
+    stacktrace = Keyword.get(opts, :stacktrace)
 
     acc =
       if idle_time, do: [idle_time: idle_time], else: []
@@ -916,10 +1057,11 @@ defmodule Ecto.Adapters.SQL do
     metadata = %{
       type: :ecto_sql_query,
       repo: repo,
-      result: log_result(result),
+      result: result,
       params: params,
-      query: query_string,
+      query: query,
       source: source,
+      stacktrace: stacktrace,
       options: Keyword.get(opts, :telemetry_options, [])
     }
 
@@ -931,8 +1073,8 @@ defmodule Ecto.Adapters.SQL do
       true ->
         Logger.log(
           log,
-          fn -> log_iodata(measurements, metadata) end,
-          ansi_color: sql_color(query_string)
+          fn -> log_iodata(measurements, repo, source, query, opts[:cast_params] || params, result, stacktrace) end,
+          ansi_color: sql_color(query)
         )
 
       false ->
@@ -941,8 +1083,8 @@ defmodule Ecto.Adapters.SQL do
       level ->
         Logger.log(
           level,
-          fn -> log_iodata(measurements, metadata) end,
-          ansi_color: sql_color(query_string)
+          fn -> log_iodata(measurements, repo, source, query, opts[:cast_params] || params, result, stacktrace) end,
+          ansi_color: sql_color(query)
         )
     end
 
@@ -958,17 +1100,7 @@ defmodule Ecto.Adapters.SQL do
   defp log_measurements([], total, acc),
     do: Map.new([total_time: total] ++ acc)
 
-  defp log_result({:ok, _query, res}), do: {:ok, res}
-  defp log_result(other), do: other
-
-  defp log_iodata(measurements, metadata) do
-    %{
-      params: params,
-      query: query,
-      result: result,
-      source: source
-    } = metadata
-
+  defp log_iodata(measurements, repo, source, query, params, result, stacktrace) do
     [
       "QUERY",
       ?\s,
@@ -981,7 +1113,8 @@ defmodule Ecto.Adapters.SQL do
       ?\n,
       query,
       ?\s,
-      inspect(params, charlists: false)
+      inspect(params, charlists: false),
+      log_stacktrace(stacktrace, repo)
     ]
   end
 
@@ -1007,6 +1140,42 @@ defmodule Ecto.Adapters.SQL do
         []
     end
   end
+
+  defp log_stacktrace(stacktrace, repo) do
+    with [_ | _] <- stacktrace,
+         {module, function, arity, info} <- last_non_ecto(Enum.reverse(stacktrace), repo, nil) do
+      [
+        ?\n,
+        IO.ANSI.light_black(),
+        "↳ ",
+        Exception.format_mfa(module, function, arity),
+        log_stacktrace_info(info),
+        IO.ANSI.reset(),
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp log_stacktrace_info([file: file, line: line] ++ _) do
+    [", at: ", file, ?:, Integer.to_string(line)]
+  end
+
+  defp log_stacktrace_info(_) do
+    []
+  end
+
+  @repo_modules [Ecto.Repo.Queryable, Ecto.Repo.Schema, Ecto.Repo.Transaction]
+
+  defp last_non_ecto([{mod, _, _, _} | _stacktrace], repo, last)
+       when mod == repo or mod in @repo_modules,
+       do: last
+
+  defp last_non_ecto([last | stacktrace], repo, _last),
+    do: last_non_ecto(stacktrace, repo, last)
+
+  defp last_non_ecto([], _repo, last),
+    do: last
 
   ## Connection helpers
 

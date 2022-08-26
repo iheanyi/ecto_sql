@@ -46,7 +46,7 @@ defmodule Ecto.Adapters.PostgresTest do
   end
 
   defp plan(query, operation \\ :all) do
-    {query, _params} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.Postgres, query)
+    {query, _cast_params, _dump_params} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.Postgres, query)
     query
   end
 
@@ -542,6 +542,9 @@ defmodule Ecto.Adapters.PostgresTest do
     query = Schema |> select([r], fragment("downcase(?)", r.x)) |> plan()
     assert all(query) == ~s{SELECT downcase(s0."x") FROM "schema" AS s0}
 
+    query = Schema |> select([r], fragment("? COLLATE ?", r.x, literal(^"es_ES"))) |> plan()
+    assert all(query) == ~s{SELECT s0."x" COLLATE "es_ES" FROM "schema" AS s0}
+
     value = 13
     query = Schema |> select([r], fragment("downcase(?, ?)", r.x, ^value)) |> plan()
     assert all(query) == ~s{SELECT downcase(s0."x", $1) FROM "schema" AS s0}
@@ -570,6 +573,27 @@ defmodule Ecto.Adapters.PostgresTest do
 
     query = "schema" |> where(foo: 123.0) |> select([], true) |> plan()
     assert all(query) == ~s{SELECT TRUE FROM "schema" AS s0 WHERE (s0."foo" = 123.0::float)}
+  end
+
+  test "aliasing a selected value with selected_as/2" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> plan()
+    assert all(query) == ~s{SELECT s0."x" AS "integer" FROM "schema" AS s0}
+
+    query = "schema" |> select([s], s.x |> coalesce(0) |> sum() |> selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT sum(coalesce(s0."x", 0)) AS "integer" FROM "schema" AS s0}
+  end
+
+  test "group_by can reference the alias of a selected value with selected_as/1" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> group_by(selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT s0."x" AS "integer" FROM "schema" AS s0 GROUP BY "integer"}
+  end
+
+  test "order_by can reference the alias of a selected value with selected_as/1" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by(selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT s0."x" AS "integer" FROM "schema" AS s0 ORDER BY "integer"}
+
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by([desc: selected_as(:integer)]) |> plan()
+    assert all(query) == ~s{SELECT s0."x" AS "integer" FROM "schema" AS s0 ORDER BY "integer" DESC}
   end
 
   test "datetime_add" do
@@ -603,6 +627,26 @@ defmodule Ecto.Adapters.PostgresTest do
 
     query = Schema |> select([s], json_extract_path(s.meta, ["\"a"])) |> plan()
     assert all(query) == ~s|SELECT (s0.\"meta\"#>'{"\\"a"}') FROM "schema" AS s0|
+  end
+
+  test "optimized json_extract_path" do
+    query = Schema |> where([s], s.meta["id"] == 123) |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE ((s0."meta"@>'{"id": 123}'))|
+
+    query = Schema |> where([s], s.meta["id"] == "123") |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE ((s0."meta"@>'{"id": "123"}'))|
+
+    query = Schema |> where([s], s.meta["tags"][0]["name"] == "123") |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE (((s0."meta"#>'{"tags",0}')@>'{"name": "123"}'))|
+
+    query = Schema |> where([s], s.meta[0] == "123") |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE ((s0.\"meta\"#>'{0}') = '123')|
+
+    query = Schema |> where([s], s.meta["enabled"] == true) |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE ((s0."meta"@>'{"enabled": true}'))|
+
+    query = Schema |> where([s], s.meta["extra"][0]["enabled"] == false) |> select(true) |> plan()
+    assert all(query) == ~s|SELECT TRUE FROM "schema" AS s0 WHERE (((s0."meta"#>'{"extra",0}')@>'{"enabled": false}'))|
   end
 
   test "nested expressions" do
@@ -826,6 +870,26 @@ defmodule Ecto.Adapters.PostgresTest do
     query = from(m in Schema, update: [pull: [w: 0]]) |> plan(:update_all)
     assert update_all(query) ==
            ~s{UPDATE "schema" AS s0 SET "w" = array_remove(s0."w", 0)}
+  end
+
+  test "update all with subquery" do
+    sub = from(p in Schema, where: p.x > ^10)
+
+    query =
+      Schema
+      |> join(:inner, [p], p2 in subquery(sub), on: p.id == p2.id)
+      |> update([_], set: [x: ^100])
+
+    {planned_query, cast_params, dump_params} =
+      Ecto.Adapter.Queryable.plan_query(:update_all, Ecto.Adapters.Postgres, query)
+
+    assert update_all(planned_query) ==
+      ~s{UPDATE "schema" AS s0 SET "x" = $1 FROM } <>
+      ~s{(SELECT ss0."id" AS "id", ss0."x" AS "x", ss0."y" AS "y", ss0."z" AS "z", ss0."w" AS "w", ss0."meta" AS "meta" FROM "schema" AS ss0 WHERE (ss0."x" > $2)) } <>
+      ~s{AS s1 WHERE (s0."id" = s1."id")}
+
+    assert cast_params == [100, 10]
+    assert dump_params == [100, 10]
   end
 
   test "update all with prefix" do
@@ -1179,9 +1243,6 @@ defmodule Ecto.Adapters.PostgresTest do
     # For :replace_all
     query = insert(nil, "schema", [:x, :y], [[:x, :y]], {[:x, :y], [], [:id]}, [])
     assert query == ~s{INSERT INTO "schema" ("x","y") VALUES ($1,$2) ON CONFLICT ("id") DO UPDATE SET "x" = EXCLUDED."x","y" = EXCLUDED."y"}
-
-    query = insert(nil, "schema", [:x, :y], [[:x, :y]], {[:x, :y], [], {:constraint, :foo}}, [])
-    assert query == ~s{INSERT INTO "schema" ("x","y") VALUES ($1,$2) ON CONFLICT ON CONSTRAINT \"foo\" DO UPDATE SET "x" = EXCLUDED."x","y" = EXCLUDED."y"}
 
     query = insert(nil, "schema", [:x, :y], [[:x, :y]], {[:x, :y], [], {:unsafe_fragment, "(\"id\")"}}, [])
     assert query == ~s{INSERT INTO "schema" ("x","y") VALUES ($1,$2) ON CONFLICT (\"id\") DO UPDATE SET "x" = EXCLUDED."x","y" = EXCLUDED."y"}
@@ -1562,6 +1623,7 @@ defmodule Ecto.Adapters.PostgresTest do
              {:modify, :status, :string, from: :integer},
              {:modify, :user_id, :integer, from: %Reference{table: :users}},
              {:modify, :group_id, %Reference{table: :groups, column: :gid}, from: %Reference{table: :groups}},
+             {:modify, :status, :string, [null: false, size: 100, from: {:integer, null: true, size: 50}]},
              {:remove, :summary},
              {:remove, :body, :text, []},
              {:remove, :space_id, %Reference{table: :author}, []},
@@ -1592,6 +1654,8 @@ defmodule Ecto.Adapters.PostgresTest do
     DROP CONSTRAINT "posts_group_id_fkey",
     ALTER COLUMN "group_id" TYPE bigint,
     ADD CONSTRAINT "posts_group_id_fkey" FOREIGN KEY ("group_id") REFERENCES "groups"("gid"),
+    ALTER COLUMN "status" TYPE varchar(100),
+    ALTER COLUMN "status" SET NOT NULL,
     DROP COLUMN "summary",
     DROP COLUMN "body",
     DROP CONSTRAINT "posts_space_id_fkey",

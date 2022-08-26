@@ -44,7 +44,17 @@ ExUnit.start(
     :transaction_checkout_raises,
     # JSON_VALUE always returns strings (even for e.g. integers) and returns null for
     # arrays/objects (JSON_QUERY must be used for these)
-    :json_extract_path
+    :json_extract_path,
+    # MSSQL does not support streaming
+    :stream,
+    # MSSQL fails the regex matching because it uses square brackets outside of the parameter list
+    :parameter_logging,
+    # MSSQL can't reference aliased columns in GROUP BY
+    :selected_as_with_group_by,
+    # MSSQL can't reference aliased columns in HAVING
+    :selected_as_with_having,
+    # MSSQL can't reference aliased columns in ORDER BY expressions
+    :selected_as_with_order_by_expression
   ]
 )
 

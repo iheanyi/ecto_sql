@@ -1,5 +1,57 @@
 # Changelog for v3.x
 
+## v3.9.0-dev (unreleased)
+
+### Enhancements
+
+  * [migrations] Support `primary_key` configuration options in `table`
+  * [postgres] Support the use of advisory locks for migrations
+  * [sql] Add `dump_cmd` to `postgrex` and `myxql` adapters
+  * [sql] Log human-readable UUIDs by using pre-dumped query parameters
+  * [sql] Support select aliases from `selected_as/1` and `selected_as/2`
+  * [telemetry] Emit `schema_migration: true` under `telemetry_options`
+
+## v3.8.3 (2022-06-04)
+
+### Enhancements
+
+  * [sql] Implement `literal/1` support in fragments
+
+## v3.8.2 (2022-05-18)
+
+### Bug fixes
+
+  * [postgres] Fix possible breaking change on `json_extract_path` for boolean values introduced in v3.8.0
+  * [sql] Colorize stacktrace and use `:` before printing line number 
+
+## v3.8.1 (2022-04-29)
+
+### Bug fixes
+
+  * [mysql] Raise on a subquery with parameter on MySQL join
+  * [sql] Do not invoke dynamic repositories in direct `Ecto.Adapters.SQL` operations
+
+## v3.8.0 (2022-04-26)
+
+### Enhancements
+
+  * [migrations] Support `--to-exclusive` in `mix ecto.migrate` and `mix ecto.rollback`
+  * [mysql] Add `:comment` support on MySQL migrations
+  * [postgres] Support `:prepare` option per operation
+  * [postgres] Optimize `json_extract_path` comparisons in PostgreSQL
+  * [sql] Optionally log last known call, publish stacktrace in telemetry
+  * [telemetry] Include `:repo` option in telemetry events
+
+### Bug fixes
+
+  * [sql] Ensure `:timeout` option is respected in `Ecto.Adapters.SQL.explain/3`
+
+## v3.7.2 (2022-01-23)
+
+### Enhancements
+
+  * [adapters] Support latest `myxql` and `postgrex`
+
 ## v3.7.1 (2021-10-12)
 
 ### Enhancements

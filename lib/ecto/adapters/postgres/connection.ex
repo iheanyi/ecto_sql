@@ -67,12 +67,34 @@ if Code.ensure_loaded?(Postgrex) do
 
     @impl true
     def prepare_execute(conn, name, sql, params, opts) do
-      Postgrex.prepare_execute(conn, name, sql, params, opts)
+      case Postgrex.prepare_execute(conn, name, sql, params, opts) do
+        {:error, %Postgrex.Error{postgres: %{pg_code: "22P02", message: message}} = error} ->
+          context = """
+          . If you are trying to query a JSON field, the parameter may need to be interpolated. \
+          Instead of
+
+              p.json["field"] != "value"
+
+          do
+
+              p.json["field"] != ^"value"
+          """
+
+          {:error, put_in(error.postgres.message, message <> context)}
+        other ->
+          other
+        end
+
     end
 
     @impl true
     def query(conn, sql, params, opts) do
       Postgrex.query(conn, sql, params, opts)
+    end
+
+    @impl true
+    def query_many(_conn, _sql, _params, _opts) do
+      raise RuntimeError, "query_many is not supported in the Postgrex adapter"
     end
 
     @impl true
@@ -187,8 +209,6 @@ if Code.ensure_loaded?(Postgrex) do
     defp conflict_target!(target),
       do: conflict_target(target)
 
-    defp conflict_target({:constraint, constraint}),
-      do: ["ON CONSTRAINT ", quote_name(constraint), ?\s]
     defp conflict_target({:unsafe_fragment, fragment}),
       do: [fragment, ?\s]
     defp conflict_target([]),
@@ -652,6 +672,14 @@ if Code.ensure_loaded?(Postgrex) do
       |> parens_for_select
     end
 
+    defp expr({:literal, _, [literal]}, _sources, _query) do
+      quote_name(literal)
+    end
+
+    defp expr({:selected_as, _, [name]}, _sources, _query) do
+      [quote_name(name)]
+    end
+
     defp expr({:datetime_add, _, [datetime, count, interval]}, sources, query) do
       [expr(datetime, sources, query), type_unless_typed(datetime, "timestamp"), " + ",
        interval(count, interval, sources, query)]
@@ -663,16 +691,7 @@ if Code.ensure_loaded?(Postgrex) do
     end
 
     defp expr({:json_extract_path, _, [expr, path]}, sources, query) do
-      path =
-        intersperse_map(path, ?,, fn
-          binary when is_binary(binary) ->
-            [?", escape_json_key(binary), ?"]
-
-          integer when is_integer(integer) ->
-            Integer.to_string(integer)
-        end)
-
-      [?(, expr(expr, sources, query), "#>'{", path, "}')"]
+      json_extract_path(expr, path, sources, query)
     end
 
     defp expr({:filter, _, [agg, filter]}, sources, query) do
@@ -695,6 +714,18 @@ if Code.ensure_loaded?(Postgrex) do
     end
 
     defp expr({:count, _, []}, _sources, _query), do: "count(*)"
+
+    defp expr({:==, _, [{:json_extract_path, _, [expr, path]} = left, right]}, sources, query)
+         when is_binary(right) or is_integer(right) or is_boolean(right) do
+      case Enum.split(path, -1) do
+        {path, [last]} when is_binary(last) ->
+          extracted = json_extract_path(expr, path, sources, query)
+          [?(, extracted, "@>'{", escape_json(last), ": ", escape_json(right) | "}')"]
+
+        _ ->
+          [maybe_paren(left, sources, query), " = " | maybe_paren(right, sources, query)]
+      end
+    end
 
     defp expr({fun, _, args}, sources, query) when is_atom(fun) and is_list(args) do
       {modifier, args} =
@@ -743,6 +774,19 @@ if Code.ensure_loaded?(Postgrex) do
 
     defp expr(literal, _sources, _query) when is_float(literal) do
       [Float.to_string(literal) | "::float"]
+    end
+
+    defp expr(expr, _sources, query) do
+      error!(query, "unsupported expression: #{inspect(expr)}")
+    end
+
+    defp json_extract_path(expr, [], sources, query) do
+      expr(expr, sources, query)
+    end
+
+    defp json_extract_path(expr, path, sources, query) do
+      path = intersperse_map(path, ?,, &escape_json/1)
+      [?(, expr(expr, sources, query), "#>'{", path, "}')"]
     end
 
     defp type_unless_typed(%Ecto.Query.Tagged{}, _type), do: []
@@ -1244,10 +1288,12 @@ if Code.ensure_loaded?(Postgrex) do
     defp quote_name(name) when is_atom(name) do
       quote_name(Atom.to_string(name))
     end
-    defp quote_name(name) do
+
+    defp quote_name(name) when is_binary(name) do
       if String.contains?(name, "\"") do
-        error!(nil, "bad field name #{inspect name}")
+        error!(nil, "bad literal/field/table name #{inspect name} (\" is not permitted)")
       end
+
       [?", name, ?"]
     end
 
@@ -1303,11 +1349,21 @@ if Code.ensure_loaded?(Postgrex) do
       :binary.replace(value, "'", "''", [:global])
     end
 
-    defp escape_json_key(value) when is_binary(value) do
-      value
-      |> escape_string()
-      |> :binary.replace("\"", "\\\"", [:global])
+    defp escape_json(value) when is_binary(value) do
+      escaped =
+        value
+        |> escape_string()
+        |> :binary.replace("\"", "\\\"", [:global])
+
+      [?", escaped, ?"]
     end
+
+    defp escape_json(value) when is_integer(value) do
+      Integer.to_string(value)
+    end
+
+    defp escape_json(true), do: ["true"]
+    defp escape_json(false), do: ["false"]
 
     defp ecto_to_db({:array, t}),          do: [ecto_to_db(t), ?[, ?]]
     defp ecto_to_db(:id),                  do: "integer"

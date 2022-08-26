@@ -57,13 +57,18 @@ if Code.ensure_loaded?(Tds) do
 
     @impl true
     def stream(_conn, _sql, _params, _opts) do
-      error!(nil, "Repo.stream is not supported in Tds adapter")
+      error!(nil, "Repo.stream is not supported in the Tds adapter")
     end
 
     @impl true
     def query(conn, sql, params, opts) do
       params = prepare_params(params)
       Tds.query(conn, sql, params, opts)
+    end
+
+    @impl true
+    def query_many(_conn, _sql, _params, _opts) do
+      error!(nil, "query_many is not supported in the Tds adapter")
     end
 
     @impl true
@@ -753,6 +758,14 @@ if Code.ensure_loaded?(Tds) do
         {:expr, expr} -> expr(expr, sources, query)
       end)
       |> parens_for_select
+    end
+
+    defp expr({:literal, _, [literal]}, _sources, _query) do
+      quote_name(literal)
+    end
+
+    defp expr({:selected_as, _, [name]}, _sources, _query) do
+      [quote_name(name)]
     end
 
     defp expr({:datetime_add, _, [datetime, count, interval]}, sources, query) do
@@ -1506,9 +1519,9 @@ if Code.ensure_loaded?(Tds) do
       quote_name(Atom.to_string(name))
     end
 
-    defp quote_name(name) do
+    defp quote_name(name) when is_binary(name) do
       if String.contains?(name, ["[", "]"]) do
-        error!(nil, "bad field name #{inspect(name)} '[' and ']' are not permitted")
+        error!(nil, "bad literal/field/table name #{inspect(name)} ('[' and ']' are not permitted)")
       end
 
       "[#{name}]"

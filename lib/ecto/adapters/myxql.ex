@@ -118,6 +118,19 @@ defmodule Ecto.Adapters.MyXQL do
 
   If your version of MySQL supports microsecond precision, you
   will be able to utilize Ecto's usec types.
+
+  ## Multiple Result Support
+
+  MyXQL supports the execution of queries that return multiple
+  results, such as text queries with multiple statements separated
+  by semicolons or stored procedures. These can be executed with
+  `Ecto.Adapters.SQL.query_many/4` or the `YourRepo.query_many/3`
+  shortcut.
+
+  Be default, these queries will be executed with the `:query_type`
+  option set to `:text`. To take advantage of prepared statements
+  when executing a stored procedure, set the `:query_type` option
+  to `:binary`.
   """
 
   # Inherit all behaviour from Ecto.Adapters.SQL
@@ -231,7 +244,7 @@ defmodule Ecto.Adapters.MyXQL do
       Ecto.Adapters.SQL.raise_migration_pool_size_error()
     end
 
-    opts = Keyword.put(opts, :timeout, :infinity)
+    opts = Keyword.merge(opts, [timeout: :infinity, telemetry_options: [schema_migration: true]])
 
     lock_name = "\"ecto_#{inspect(repo)}\""
 
@@ -329,16 +342,17 @@ defmodule Ecto.Adapters.MyXQL do
   def structure_load(default, config) do
     path = config[:dump_path] || Path.join(default, "structure.sql")
 
-    args = [
-      "--execute", "SET FOREIGN_KEY_CHECKS = 0; SOURCE #{path}; SET FOREIGN_KEY_CHECKS = 1",
-      "--database", config[:database]
-    ]
+    args = ["--execute", "SET FOREIGN_KEY_CHECKS = 0; SOURCE #{path}; SET FOREIGN_KEY_CHECKS = 1"]
 
     case run_with_cmd("mysql", config, args) do
       {_output, 0} -> {:ok, path}
       {output, _}  -> {:error, output}
     end
   end
+
+  @impl true
+  def dump_cmd(args, opts \\ [], config) when is_list(config) and is_list(args),
+    do: run_with_cmd("mysqldump", config, args, opts)
 
   ## Helpers
 
@@ -380,7 +394,7 @@ defmodule Ecto.Adapters.MyXQL do
 
   defp exit_to_exception(reason), do: RuntimeError.exception(Exception.format_exit(reason))
 
-  defp run_with_cmd(cmd, opts, opt_args) do
+  defp run_with_cmd(cmd, opts, opt_args, cmd_opts \\ []) do
     unless System.find_executable(cmd) do
       raise "could not find executable `#{cmd}` in path, " <>
             "please guarantee it is available before running ecto commands"
@@ -404,13 +418,26 @@ defmodule Ecto.Adapters.MyXQL do
         []
       end
 
+    database_args =
+      if database = opts[:database] do
+        ["--database", database]
+      else
+        []
+      end
+
     args =
       [
         "--host", host,
         "--port", to_string(port),
         "--protocol", protocol
-      ] ++ user_args ++ opt_args
+      ] ++ user_args ++ database_args ++ opt_args
 
-    System.cmd(cmd, args, env: env, stderr_to_stdout: true)
+    cmd_opts =
+      cmd_opts
+      |> Keyword.put_new(:stderr_to_stdout, true)
+      |> Keyword.update(:env, env, &Enum.concat(env, &1))
+
+
+    System.cmd(cmd, args, cmd_opts)
   end
 end

@@ -44,7 +44,7 @@ defmodule Ecto.Adapters.MyXQLTest do
   end
 
   defp plan(query, operation \\ :all) do
-    {query, _params} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.MyXQL, query)
+    {query, _cast_params, _dump_params} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.MyXQL, query)
     query
   end
 
@@ -242,7 +242,7 @@ defmodule Ecto.Adapters.MyXQLTest do
       |> select([:id, :parent_id])
 
     cte_query = initial_query |> union_all(^iteration_query)
-    
+
     breadcrumbs_query =
       "tree"
       |> recursive_ctes(true)
@@ -497,6 +497,9 @@ defmodule Ecto.Adapters.MyXQLTest do
     query = Schema |> select([r], r.x) |> where([], fragment("? = \"query\\?\"", ^10)) |> plan()
     assert all(query) == ~s{SELECT s0.`x` FROM `schema` AS s0 WHERE (? = \"query?\")}
 
+    query = Schema |> select([r], fragment("? COLLATE ?", r.x, literal(^"es_ES"))) |> plan()
+    assert all(query) == ~s{SELECT s0.`x` COLLATE `es_ES` FROM `schema` AS s0}
+
     value = 13
     query = Schema |> select([r], fragment("lcase(?, ?)", r.x, ^value)) |> plan()
     assert all(query) == ~s{SELECT lcase(s0.`x`, ?) FROM `schema` AS s0}
@@ -522,6 +525,38 @@ defmodule Ecto.Adapters.MyXQLTest do
 
     query = "schema" |> where(foo: 123.0) |> select([], true) |> plan()
     assert all(query) == ~s{SELECT TRUE FROM `schema` AS s0 WHERE (s0.`foo` = (0 + 123.0))}
+  end
+
+  test "aliasing a selected value with selected_as/2" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> plan()
+    assert all(query) == ~s{SELECT s0.`x` AS `integer` FROM `schema` AS s0}
+
+    query = "schema" |> select([s], s.x |> coalesce(0) |> sum() |> selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT sum(coalesce(s0.`x`, 0)) AS `integer` FROM `schema` AS s0}
+  end
+
+  test "group_by can reference the alias of a selected value with selected_as/1" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> group_by(selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT s0.`x` AS `integer` FROM `schema` AS s0 GROUP BY `integer`}
+  end
+
+  test "order_by can reference the alias of a selected value with selected_as/1" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by(selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT s0.`x` AS `integer` FROM `schema` AS s0 ORDER BY `integer`}
+
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by([desc: selected_as(:integer)]) |> plan()
+    assert all(query) == ~s{SELECT s0.`x` AS `integer` FROM `schema` AS s0 ORDER BY `integer` DESC}
+  end
+
+  test "having can reference the alias of a selected value with selected_as/1" do
+    query =
+      "schema"
+      |> select([s], selected_as(s.x, :integer))
+      |> group_by(selected_as(:integer))
+      |> having(selected_as(:integer) > 0)
+      |> plan()
+
+    assert all(query) == ~s{SELECT s0.`x` AS `integer` FROM `schema` AS s0 GROUP BY `integer` HAVING (`integer` > 0)}
   end
 
   test "tagged type" do
@@ -709,6 +744,21 @@ defmodule Ecto.Adapters.MyXQLTest do
       query = from(e in Schema, where: e.x == 123, select: e.x)
       update_all(query)
     end
+  end
+
+  test "update all with subquery" do
+    sub = from(p in Schema, where: p.x > 10)
+
+    query =
+      Schema
+      |> join(:inner, [p], p2 in subquery(sub), on: p.id == p2.id)
+      |> update([_], set: [x: ^100])
+      |> plan(:update_all)
+
+    assert update_all(query) ==
+      ~s{UPDATE `schema` AS s0, } <>
+      ~s{(SELECT ss0.`id` AS `id`, ss0.`x` AS `x`, ss0.`y` AS `y`, ss0.`z` AS `z`, ss0.`meta` AS `meta` FROM `schema` AS ss0 WHERE (ss0.`x` > 10)) AS s1 } <>
+      ~s{SET s0.`x` = ? WHERE (s0.`id` = s1.`id`)}
   end
 
   test "update all with prefix" do
@@ -1101,6 +1151,20 @@ defmodule Ecto.Adapters.MyXQLTest do
     """ |> remove_newlines]
   end
 
+  test "create table with comment on columns and table" do
+    create = {:create, table(:posts, comment: "comment", prefix: :foo),
+              [
+                {:add, :category_0, %Reference{table: :categories}, [comment: "column comment"]},
+                {:add, :created_at, :datetime, []},
+                {:add, :updated_at, :datetime, [comment: "column comment 2"]}
+              ]}
+    assert execute_ddl(create) == ["""
+    CREATE TABLE `foo`.`posts` (`category_0` BIGINT UNSIGNED COMMENT 'column comment',
+    CONSTRAINT `posts_category_0_fkey` FOREIGN KEY (`category_0`) REFERENCES `foo`.`categories`(`id`),
+    `created_at` datetime, `updated_at` datetime COMMENT 'column comment 2') COMMENT = 'comment' ENGINE = INNODB
+    """ |> remove_newlines]
+  end
+
   test "create table with engine" do
     create = {:create, table(:posts, engine: :myisam),
                [{:add, :id, :serial, [primary_key: true]}]}
@@ -1303,6 +1367,7 @@ defmodule Ecto.Adapters.MyXQLTest do
                 {:modify, :status, :string, from: :integer},
                 {:modify, :user_id, :integer, from: %Reference{table: :users}},
                 {:modify, :group_id, %Reference{table: :groups, column: :gid}, from: %Reference{table: :groups}},
+                {:modify, :status, :string, [null: false, size: 100, from: {:integer, null: true, size: 50}]},
                 {:remove, :summary},
                 {:remove, :body, :text, []},
                 {:remove, :space_id, %Reference{table: :author}, []},
@@ -1325,6 +1390,7 @@ defmodule Ecto.Adapters.MyXQLTest do
     DROP FOREIGN KEY `posts_group_id_fkey`,
     MODIFY `group_id` BIGINT UNSIGNED,
     ADD CONSTRAINT `posts_group_id_fkey` FOREIGN KEY (`group_id`) REFERENCES `groups`(`gid`),
+    MODIFY `status` varchar(100) NOT NULL,
     DROP `summary`,
     DROP `body`,
     DROP FOREIGN KEY `posts_space_id_fkey`,
@@ -1333,6 +1399,24 @@ defmodule Ecto.Adapters.MyXQLTest do
     DROP FOREIGN KEY IF EXISTS `posts_space_id_fkey`,
     DROP IF EXISTS `space_id`
     """ |> remove_newlines]
+  end
+
+  test "alter table with comments on table and columns" do
+    alter = {:alter, table(:posts, comment: "table comment"),
+             [{:add, :title, :string, [default: "Untitled", size: 100, null: false, comment: "column comment"]},
+              {:modify, :price, :numeric, [precision: 8, scale: 2, null: true]},
+              {:modify, :permalink_id, %Reference{table: :permalinks}, [null: false, comment: "column comment 2"]},
+              {:remove, :summary}]}
+
+    assert execute_ddl(alter) == ["""
+    ALTER TABLE `posts`
+    ADD `title` varchar(100) DEFAULT 'Untitled' NOT NULL COMMENT 'column comment',
+    MODIFY `price` numeric(8,2) NULL,
+    MODIFY `permalink_id` BIGINT UNSIGNED NOT NULL COMMENT 'column comment 2',
+    ADD CONSTRAINT `posts_permalink_id_fkey` FOREIGN KEY (`permalink_id`) REFERENCES `permalinks`(`id`),
+    DROP `summary`
+    """ |> remove_newlines,
+    ~s|ALTER TABLE `posts` COMMENT 'table comment'|]
   end
 
   test "alter table with prefix" do

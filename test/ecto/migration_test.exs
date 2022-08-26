@@ -216,6 +216,14 @@ defmodule Ecto.MigrationTest do
            {:create, table, [{:add, :uuid, :uuid, [primary_key: true]}]}
   end
 
+  test "forward: create a table with only custom primary key via table options" do
+    create(table = table(:posts, primary_key: [name: :uuid, type: :uuid]))
+    flush()
+
+    assert last_command() ==
+           {:create, table, [{:add, :uuid, :uuid, [primary_key: true]}]}
+  end
+
   @tag repo_config: [migration_primary_key: [type: :uuid, default: {:fragment, "gen_random_uuid()"}]]
   test "forward: create a table with custom primary key options" do
     create(table = table(:posts)) do
@@ -224,6 +232,23 @@ defmodule Ecto.MigrationTest do
 
     assert last_command() ==
            {:create, table, [{:add, :id, :uuid, [primary_key: true, default: {:fragment, "gen_random_uuid()"}]}]}
+  end
+
+  test "forward: create a table with custom primary key options via table options" do
+    create(table = table(:posts, primary_key: [type: :uuid, default: {:fragment, "gen_random_uuid()"}])) do
+    end
+    flush()
+
+    assert last_command() ==
+           {:create, table, [{:add, :id, :uuid, [primary_key: true, default: {:fragment, "gen_random_uuid()"}]}]}
+  end
+
+  test "forward: passing a value other than a bool to :primary_key on table/2 raises" do
+    assert_raise ArgumentError, ":primary_key option must be either a boolean or a keyword list of options", fn ->
+      create(table(:posts, primary_key: "not a valid value")) do
+      end
+      flush()
+    end
   end
 
   @tag repo_config: [migration_primary_key: false]
@@ -718,12 +743,18 @@ defmodule Ecto.MigrationTest do
     alter table(:posts) do
       add :summary, :text
       modify :extension, :text, from: :string
+      modify :author, :string, null: false, from: :text
+      modify :title, :string, null: false, size: 100, from: {:text, null: true, size: 255}
     end
     flush()
 
     assert last_command() ==
-           {:alter, %Table{name: "posts"},
-              [{:modify, :extension, :string, from: :text}, {:remove, :summary}]}
+           {:alter, %Table{name: "posts"}, [
+              {:modify, :title, :text, [from: {:string, null: false, size: 100}, null: true, size: 255]},
+              {:modify, :author, :text, [from: :string, null: false]},
+              {:modify, :extension, :string, from: :text},
+              {:remove, :summary}
+            ]}
 
     assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
       alter table(:posts) do

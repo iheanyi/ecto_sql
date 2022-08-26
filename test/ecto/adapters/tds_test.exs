@@ -50,7 +50,7 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   defp plan(query, operation \\ :all) do
-    {query, _} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.Tds, query)
+    {query, _, _} = Ecto.Adapter.Queryable.plan_query(operation, Ecto.Adapters.Tds, query)
     query
   end
 
@@ -600,12 +600,11 @@ defmodule Ecto.Adapters.TdsTest do
   end
 
   test "fragments" do
-    query =
-      Schema
-      |> select([r], fragment("lower(?)", r.x))
-      |> plan()
-
+    query = Schema |> select([r], fragment("lower(?)", r.x)) |> plan()
     assert all(query) == ~s{SELECT lower(s0.[x]) FROM [schema] AS s0}
+
+    query = Schema |> select([r], fragment("? COLLATE ?", r.x, literal(^"es_ES"))) |> plan()
+    assert all(query) == ~s{SELECT s0.[x] COLLATE [es_ES] FROM [schema] AS s0}
 
     value = 13
     query = Schema |> select([r], fragment("lower(?)", ^value)) |> plan()
@@ -640,6 +639,22 @@ defmodule Ecto.Adapters.TdsTest do
 
     query = "schema" |> where(foo: 123.0) |> select([], true) |> plan()
     assert all(query) == ~s{SELECT CAST(1 as bit) FROM [schema] AS s0 WHERE (s0.[foo] = 123.0)}
+  end
+
+  test "aliasing a selected value with selected_as/2" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> plan()
+    assert all(query) == ~s{SELECT s0.[x] AS [integer] FROM [schema] AS s0}
+
+    query = "schema" |> select([s], s.x |> coalesce(0) |> sum() |> selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT sum(coalesce(s0.[x], 0)) AS [integer] FROM [schema] AS s0}
+  end
+
+  test "order_by can reference the alias of a selected value with selected_as/1s" do
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by(selected_as(:integer)) |> plan()
+    assert all(query) == ~s{SELECT s0.[x] AS [integer] FROM [schema] AS s0 ORDER BY [integer]}
+
+    query = "schema" |> select([s], selected_as(s.x, :integer)) |> order_by([desc: selected_as(:integer)]) |> plan()
+    assert all(query) == ~s{SELECT s0.[x] AS [integer] FROM [schema] AS s0 ORDER BY [integer] DESC}
   end
 
   test "tagged type" do
@@ -838,6 +853,25 @@ defmodule Ecto.Adapters.TdsTest do
     assert update_all(query) ==
              ~s{UPDATE s0 SET s0.[x] = 0 FROM [schema] AS s0 } <>
                ~s{INNER JOIN [schema2] AS s1 ON s0.[x] = s1.[z] WHERE (s0.[x] = 123)}
+  end
+
+  test "update all with subquery" do
+    sub = from(p in Schema, where: p.x > ^10)
+
+    query =
+      Schema
+      |> join(:inner, [p], p2 in subquery(sub), on: p.id == p2.id)
+      |> update([_], set: [x: ^100])
+
+    {planned_query, cast_params, dump_params} = Ecto.Adapter.Queryable.plan_query(:update_all, Ecto.Adapters.Tds, query)
+
+    assert update_all(planned_query) ==
+      ~s{UPDATE s0 SET s0.[x] = @1 FROM [schema] AS s0 INNER JOIN } <>
+      ~S{(SELECT ss0.[id] AS [id], ss0.[x] AS [x], ss0.[y] AS [y], ss0.[z] AS [z], ss0.[w] AS [w] FROM [schema] AS ss0 WHERE (ss0.[x] > @2)) } <>
+      ~S{AS s1 ON s0.[id] = s1.[id]}
+
+    assert cast_params == [100, 10]
+    assert dump_params == [100, 10]
   end
 
   test "update all with returning" do

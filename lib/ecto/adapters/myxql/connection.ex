@@ -26,6 +26,12 @@ if Code.ensure_loaded?(MyXQL) do
     end
 
     @impl true
+    def query_many(conn, sql, params, opts) do
+      opts = Keyword.put_new(opts, :query_type, :text)
+      MyXQL.query_many(conn, sql, params, opts)
+    end
+
+    @impl true
     def execute(conn, query, params, opts) do
       case MyXQL.execute(conn, query, params, opts) do
         {:ok, _, result} -> {:ok, result}
@@ -337,9 +343,13 @@ if Code.ensure_loaded?(MyXQL) do
     defp using_join(%{joins: joins} = query, kind, sources) do
       froms =
         intersperse_map(joins, ", ", fn
+          %JoinExpr{source: %Ecto.SubQuery{params: [_ | _]}} ->
+            error!(query, "MySQL adapter does not support subqueries with parameters in update_all/delete_all joins")
+
           %JoinExpr{qual: :inner, ix: ix, source: source} ->
             {join, name} = get_source(query, sources, ix, source)
             [join, " AS " | name]
+
           %JoinExpr{qual: qual} ->
             error!(query, "MySQL adapter supports only inner joins on #{kind}, got: `#{qual}`")
         end)
@@ -558,6 +568,14 @@ if Code.ensure_loaded?(MyXQL) do
       |> parens_for_select
     end
 
+    defp expr({:literal, _, [literal]}, _sources, _query) do
+      quote_name(literal)
+    end
+
+    defp expr({:selected_as, _, [name]}, _sources, _query) do
+      [quote_name(name)]
+    end
+
     defp expr({:datetime_add, _, [datetime, count, interval]}, sources, query) do
       ["date_add(", expr(datetime, sources, query), ", ",
        interval(count, interval, sources, query) | ")"]
@@ -657,6 +675,10 @@ if Code.ensure_loaded?(MyXQL) do
       ["(0 + ", Float.to_string(literal), ?)]
     end
 
+    defp expr(expr, _sources, query) do
+      error!(query, "unsupported expression: #{inspect(expr)}")
+    end
+
     defp interval(count, "millisecond", sources, query) do
       ["INTERVAL (", expr(count, sources, query) | " * 1000) microsecond"]
     end
@@ -727,6 +749,7 @@ if Code.ensure_loaded?(MyXQL) do
         if_do(command == :create_if_not_exists, "IF NOT EXISTS "),
         quote_table(table.prefix, table.name),
         table_structure,
+        comment_expr(table.comment, true),
         engine_expr(table.engine), options_expr(table.options)]]
     end
 
@@ -739,6 +762,10 @@ if Code.ensure_loaded?(MyXQL) do
     def execute_ddl({:alter, %Table{} = table, changes}) do
       [["ALTER TABLE ", quote_table(table.prefix, table.name), ?\s,
         column_changes(table, changes), pk_definitions(changes, ", ADD ")]]
+      ++
+      if_do(table.comment,
+        [["ALTER TABLE ", quote_table(table.prefix, table.name), comment_expr(table.comment)]]
+      )
     end
 
     def execute_ddl({:create, %Index{} = index}) do
@@ -883,9 +910,15 @@ if Code.ensure_loaded?(MyXQL) do
       default = Keyword.fetch(opts, :default)
       null    = Keyword.get(opts, :null)
       after_column = Keyword.get(opts, :after)
+      comment = Keyword.get(opts, :comment)
 
-      [default_expr(default), null_expr(null), after_expr(after_column)]
+      [default_expr(default), null_expr(null), after_expr(after_column), comment_expr(comment)]
     end
+
+    defp comment_expr(comment, create_table? \\ false)
+    defp comment_expr(comment, true) when is_binary(comment), do: " COMMENT = '#{escape_string(comment)}'"
+    defp comment_expr(comment, false) when is_binary(comment), do: " COMMENT '#{escape_string(comment)}'"
+    defp comment_expr(_, _), do: []
 
     defp after_expr(nil), do: []
     defp after_expr(column) when is_atom(column) or is_binary(column), do: " AFTER `#{column}`"
@@ -1014,12 +1047,13 @@ if Code.ensure_loaded?(MyXQL) do
       end
     end
 
-    defp quote_name(name) when is_atom(name),
-      do: quote_name(Atom.to_string(name))
+    defp quote_name(name) when is_atom(name) do
+      quote_name(Atom.to_string(name))
+    end
 
-    defp quote_name(name) do
+    defp quote_name(name) when is_binary(name) do
       if String.contains?(name, "`") do
-        error!(nil, "bad field name #{inspect name}")
+        error!(nil, "bad literal/field/table name #{inspect name} (` is not permitted)")
       end
 
       [?`, name, ?`]

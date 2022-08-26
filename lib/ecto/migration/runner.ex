@@ -253,8 +253,17 @@ defmodule Ecto.Migration.Runner do
   end
   defp table_reverse([{:modify, name, type, opts} | t], acc) do
     case opts[:from] do
-      nil -> false
-      from -> table_reverse(t, [{:modify, name, from, Keyword.put(opts, :from, type)} | acc])
+      nil ->
+        false
+
+      {reverse_type, from_opts} when is_list(from_opts) ->
+        reverse_from = {type, Keyword.delete(opts, :from)}
+        reverse_opts = Keyword.put(from_opts, :from, reverse_from)
+        table_reverse(t, [{:modify, name, reverse_type, reverse_opts} | acc])
+
+      reverse_type ->
+        reverse_opts = Keyword.put(opts, :from, type)
+        table_reverse(t, [{:modify, name, reverse_type, reverse_opts} | acc])
     end
   end
   defp table_reverse([{:add, name, _type, _opts} | t], acc) do
@@ -297,34 +306,8 @@ defmodule Ecto.Migration.Runner do
   end
 
   defp log_and_execute_ddl(repo, migration, log, {instruction, %Index{} = index}) do
-    if index.concurrently do
-      migration_config = migration.__migration__()
-
-      if not migration_config[:disable_ddl_transaction] do
-        IO.warn """
-        Migration #{inspect(migration)} has set index `#{index.name}` on table \
-        `#{index.table}` to concurrently but did not disable ddl transaction. \
-        Please set:
-
-            use Ecto.Migration
-            @disable_ddl_transaction true
-
-        """, []
-      end
-
-      if not migration_config[:disable_migration_lock] do
-        IO.warn """
-        Migration #{inspect(migration)} has set index `#{index.name}` on table \
-        `#{index.table}` to concurrently but did not disable migration lock. \
-        Please set:
-
-            use Ecto.Migration
-            @disable_migration_lock true
-
-        """, []
-      end
-    end
-
+    maybe_warn_index_ddl_transaction(index, migration)
+    maybe_warn_index_migration_lock(index, repo, migration)
     log_and_execute_ddl(repo, log, {instruction, index})
   end
 
@@ -353,6 +336,62 @@ defmodule Ecto.Migration.Runner do
   defp log(false, _msg, _metadata), do: :ok
   defp log(true, msg, metadata), do: Logger.log(:info, msg, metadata)
   defp log(level, msg, metadata),  do: Logger.log(level, msg, metadata)
+
+  defp maybe_warn_index_ddl_transaction(%{concurrently: true} = index, migration) do
+    migration_config = migration.__migration__()
+
+    if not migration_config[:disable_ddl_transaction] do
+      IO.warn """
+      Migration #{inspect(migration)} has set index `#{index.name}` on table \
+      `#{index.table}` to concurrently but did not disable ddl transaction. \
+      Please set:
+
+          use Ecto.Migration
+          @disable_ddl_transaction true
+      """, []
+    end
+  end
+  defp maybe_warn_index_ddl_transaction(_index, _migration), do: :ok
+
+  defp maybe_warn_index_migration_lock(%{concurrently: true} = index, repo, migration) do
+    migration_lock_disabled = migration.__migration__()[:disable_migration_lock]
+    lock_strategy = repo.config()[:migration_lock]
+    adapter = repo.__adapter__()
+
+    case {migration_lock_disabled, adapter, lock_strategy} do
+      {false, Ecto.Adapters.Postgres, :pg_advisory_lock} ->
+        :ok
+
+      {false, Ecto.Adapters.Postgres, _} ->
+        IO.warn """
+        Migration #{inspect(migration)} has set index `#{index.name}` on table \
+        `#{index.table}` to concurrently but did not disable migration lock. \
+        Please set:
+
+            use Ecto.Migration
+            @disable_migration_lock true
+
+        Alternatively, consider using advisory locks during migrations in the \
+        repo configuration:
+
+            config #{inspect(repo)}, migration_lock: :pg_advisory_lock
+        """, []
+
+      {false, _adapter, _migration_lock} ->
+        IO.warn """
+        Migration #{inspect(migration)} has set index `#{index.name}` on table \
+        `#{index.table}` to concurrently but did not disable migration lock. \
+        Please set:
+
+            use Ecto.Migration
+            @disable_migration_lock true
+        """, []
+
+      _ ->
+        :ok
+    end
+  end
+  defp maybe_warn_index_migration_lock(_index, _repo, _migration), do: :ok
 
   defp command(ddl) when is_binary(ddl) or is_list(ddl),
     do: "execute #{inspect ddl}"
